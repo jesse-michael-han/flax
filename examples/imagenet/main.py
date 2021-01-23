@@ -12,16 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Main file for running the ImageNet example.
+"""ImageNet example.
 
-This file is intentionally kept short. The majority for logic is in libraries
-than can be easily tested and imported in Colab.
+This script trains a ResNet-50 on the ImageNet dataset.
+The data is loaded using tensorflow_datasets.
 """
+
+import os
 
 from absl import app
 from absl import flags
 from absl import logging
-
 from clu import platform
 import train
 import jax
@@ -30,13 +31,12 @@ import tensorflow as tf
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('workdir', None, 'Directory to store model data.')
+flags.DEFINE_string(
+    'workdir', default=None, help='Directory to store model data.')
 config_flags.DEFINE_config_file(
-    'config',
-    None,
-    'File path to the training hyperparameter configuration.',
-    lock_config=True)
-flags.mark_flags_as_required(['config', 'workdir'])
+    'config', os.path.join(os.path.dirname(__file__), 'configs/default.py'),
+    'File path to the training hyperparameter configuration.')
+flags.mark_flags_as_required(['workdir'])
 
 
 def main(argv):
@@ -57,7 +57,7 @@ def main(argv):
   platform.work_unit().create_artifact(platform.ArtifactType.DIRECTORY,
                                        FLAGS.workdir, 'workdir')
 
-  train.train_and_evaluate(FLAGS.config, FLAGS.workdir)
+  train.train_and_evaluate(config=FLAGS.config, workdir=FLAGS.workdir)
 
 
 if __name__ == '__main__':
