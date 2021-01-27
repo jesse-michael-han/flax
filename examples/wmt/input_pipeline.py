@@ -15,6 +15,7 @@
 """Input pipeline for a WMT dataset."""
 
 import os
+import os.path as osp
 from typing import Dict, Optional, List, Union
 
 from clu import deterministic_data
@@ -27,7 +28,7 @@ AUTOTUNE = tf.data.AUTOTUNE
 Features = Dict[str, tf.Tensor]
 
 
-class NormalizeFetaureNamesOp:
+class NormalizeFeatureNamesOp:
   """Normalizes feature names to 'inputs' and 'targets'."""
 
   def __init__(self, ds_info: tfds.core.DatasetInfo, reverse_translation: bool):
@@ -41,7 +42,8 @@ class NormalizeFetaureNamesOp:
     return features
 
 
-def get_raw_dataset(dataset_builder: tfds.core.DatasetBuilder,
+def get_raw_dataset(# dataset_builder: tfds.core.DatasetBuilder,
+    dataset_name:str,
                     split: str,
                     *,
                     reverse_translation: bool = False) -> tf.data.Dataset:
@@ -58,12 +60,13 @@ def get_raw_dataset(dataset_builder: tfds.core.DatasetBuilder,
     Dataset with source and target language features mapped to 'inputs' and
     'targets'.
   """
+  dataset_builder = tfds.builder(dataset_name)
   num_examples = dataset_builder.info.splits[split].num_examples
   per_host_split = deterministic_data.get_read_instruction_for_host(
       split, num_examples, drop_remainder=False)
   ds = dataset_builder.as_dataset(split=per_host_split, shuffle_files=False)
   ds = ds.map(
-      NormalizeFetaureNamesOp(
+      NormalizeFeatureNamesOp(
           dataset_builder.info, reverse_translation=reverse_translation),
       num_parallel_calls=AUTOTUNE)
   return ds
@@ -312,6 +315,17 @@ def preprocess_wmt_data(dataset,
 
   return dataset
 
+def load_data(dataset_name, split):
+  src_data = tf.data.TextLineDataset(osp.join(dataset_name, "{}.src".format(split)))
+  tgt_data = tf.data.TextLineDataset(osp.join(dataset_name, "{}.tgt".format(split)))
+  zip_data = tf.data.Dataset.zip((src_data, tgt_data))
+
+  def to_features_dict(src, tgt):
+    return dict(
+      inputs=src,
+      targets=tgt,
+    )
+  return zip_data.map(to_features_dict, num_parallel_calls=AUTOTUNE)
 
 def get_wmt_datasets(config: ml_collections.ConfigDict,
                      *,
@@ -322,25 +336,31 @@ def get_wmt_datasets(config: ml_collections.ConfigDict,
   if vocab_path is None:
     vocab_path = os.path.expanduser('~/wmt_sentencepiece_model')
 
-  train_ds_builder = tfds.builder(config.dataset_name)
-  train_data = get_raw_dataset(
-      train_ds_builder, 'train', reverse_translation=reverse_translation)
+  # train_ds_builder = tfds.builder(config.dataset_name)
+  # train_data = get_raw_dataset(
+  #     train_ds_builder, 'train', reverse_translation=reverse_translation)
+  train_data = load_data(config.dataset_name, "train")
+  eval_data = load_data(config.dataset_name, "eval")
 
-  if config.eval_dataset_name:
-    eval_ds_builder = tfds.builder(config.eval_dataset_name)
-  else:
-    eval_ds_builder = train_ds_builder
-  eval_data = get_raw_dataset(
-      eval_ds_builder,
-      config.eval_split,
-      reverse_translation=reverse_translation)
+  # if config.eval_dataset_name:
+  #   eval_ds_builder = tfds.builder(config.eval_dataset_name)
+  # else:
+  #   eval_ds_builder = train_ds_builder
+  # eval_data = get_raw_dataset(
+  #     eval_ds_builder,
+  #     config.eval_split,
+  #     reverse_translation=reverse_translation)
+  # if config.eval_dataset_name:
+
 
   # Tokenize data.
+  print("[get_wmt_datasets]", "GETTING TOKENIZER")
   sp_tokenizer = tokenizer.load_or_train_tokenizer(
       train_data,
       vocab_path=vocab_path,
       vocab_size=config.vocab_size,
       max_corpus_chars=config.max_corpus_chars)
+
   train_data = train_data.map(
       tokenizer.TokenizeOp(sp_tokenizer), num_parallel_calls=AUTOTUNE)
   eval_data = eval_data.map(

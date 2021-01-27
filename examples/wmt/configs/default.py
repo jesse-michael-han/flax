@@ -25,14 +25,16 @@ def get_config():
   config.vocab_path = None
 
   # Vocabulary size if `vocab_path` is not given.
-  config.vocab_size = 32_000
+  config.vocab_size = 1024
 
   config.max_corpus_chars = 10**7
 
   # Name of TFDS translation dataset to use.
-  config.dataset_name = "wmt17_translate/de-en"
+  # config.dataset_name = "wmt17_translate/de-en"
+  config.dataset_name = "/home/pv/Downloads/flax/data/"
 
   # Optional name of TFDS translation dataset to use for evaluation.
+  # not used
   config.eval_dataset_name = "wmt14_translate/de-en"
   config.eval_split = "test"
 
@@ -79,17 +81,17 @@ def get_config():
   config.logits_via_embedding = True
 
   # Number of transformer layers.
-  config.num_layers = 6
+  config.num_layers = 3
 
   # Size of query/key/value for attention.
-  config.qkv_dim = 1024
+  config.qkv_dim = 16
   # Size of embeddings.
-  config.emb_dim = 1024
+  config.emb_dim = 64
   # Size of the MLP.
-  config.mlp_dim = 4096
+  config.mlp_dim = 64
 
   # Number of attention heads.
-  config.num_heads = 16
+  config.num_heads = 4
 
   # Dropout rate.
   config.dropout_rate = 0.1

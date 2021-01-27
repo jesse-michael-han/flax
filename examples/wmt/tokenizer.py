@@ -49,12 +49,18 @@ def _dump_chars_to_textfile(
   ds_iter = dataset.as_numpy_iterator()
   with tempfile.NamedTemporaryFile(
       delete=False, prefix='/tmp/ds_chars') as outfp:
-    while char_count < maxchars:
-      example = next(ds_iter)
+    # while char_count < maxchars:
+    for example in ds_iter:
+      if char_count > maxchars:
+        break
       for k in data_keys:
         line = example[k] + b'\n'
         char_count += len(line)
         outfp.write(line)
+      # for seq in example:
+      #   line = seq + b'\n'
+      #   char_count += len(seq)
+      #   outfp.write(line)
   return outfp.name, char_count
 
 
@@ -82,6 +88,7 @@ def _train_sentencepiece(dataset: tf.data.Dataset,
   Returns:
     path to the trained sentencepiece vocabulary model.
   """
+  print("[_train_sentencepiece] ENTERING")
   abs_model_path = os.path.abspath(os.path.expanduser(model_path))
   fname, _ = _dump_chars_to_textfile(
       dataset, maxchars=maxchars, data_keys=data_keys)
@@ -118,7 +125,6 @@ def _load_sentencepiece_tokenizer(model_path: str,
   sp_tokenizer = tftxt.SentencepieceTokenizer(
       model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=reverse)
   return sp_tokenizer
-
 
 def load_or_train_tokenizer(dataset: tf.data.Dataset,
                             *,

@@ -193,6 +193,7 @@ def train_step(optimizer,
   # metadata.
   # if such features are not present they are ignored and the example is treated
   # like a normal, unpacked sequence example.
+  # print("[train_step] ENTERING")
   train_keys = [
       "inputs", "targets", "inputs_position", "targets_position",
       "inputs_segmentation", "targets_segmentation"
@@ -244,6 +245,7 @@ def eval_step(params, batch, config, label_smoothing=0.0):
 
 def initialize_cache(inputs, max_decode_len, config):
   """Initialize a cache for a given input shape and max decode length."""
+  # print("INITIALIZING CACHE FOR INPUTS OF SHAPE: ", inputs.shape)
   target_shape = (inputs.shape[0], max_decode_len) + inputs.shape[2:]
   initial_variables = models.Transformer(config).init(
       jax.random.PRNGKey(0), jnp.ones(inputs.shape, config.dtype),
@@ -265,6 +267,7 @@ def predict_step(inputs,
   # rather than tiled.
   # i.e. if we denote each batch element subtensor as el[n]:
   # [el0, el1, el2] --> beamsize=2 --> [el0,el0,el1,el1,el2,el2]
+  # print("[predict_step] ENTERING")
   encoded_inputs = decode.flat_batch_beam_expand(
       models.Transformer(config).apply({"params": params},
                                        inputs,
@@ -275,6 +278,7 @@ def predict_step(inputs,
   def tokens_ids_to_logits(flat_ids, flat_cache):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
+    # print("[tokens_id_to_logits] ENTERING")
     flat_logits, new_vars = models.Transformer(config).apply(
         {
             "params": params,
@@ -360,6 +364,87 @@ def evaluate(*, p_eval_step, target, eval_ds: tf.data.Dataset,
       eval_metrics_sums)
   return eval_summary
 
+# assumes `pred_batch` is just a padded 2D tensor of tokens
+def decode_step(*, pred_batch, p_pred_step, p_init_cache, target,
+                    decode_tokens, max_predict_length: int):
+  sources, references, predictions = [], [], []
+  # print("PRED BATCH SHAPE BEFORE TREE_MAP", pred_batch.shape)
+  pred_batch = jax.tree_map(lambda x: x._numpy(), pred_batch)  # pylint: disable=protected-access
+  # print("PRED BATCH SHAPE AFTER TREE_MAP", pred_batch.shape)  
+  # Handle final odd-sized batch by padding instead of dropping it.
+  # cur_pred_batch_size = pred_batch["inputs"].shape[0]
+  cur_pred_batch_size = pred_batch.shape[0]
+
+  # if cur_pred_batch_size % n_devices: # never an issue with n_devices = 1
+  #   raise NotImplementedError
+    # padded_size = int(np.ceil(cur_pred_batch_size / n_devices) * n_devices)
+    # pred_batch = jax.tree_map(
+    #     lambda x: pad_examples(x, padded_size),  # pylint: disable=cell-var-from-loop
+    #     pred_batch)
+  # print("PRED BATCH SHAPE BEFORE SHARD", pred_batch.shape)    
+  # pred_batch = common_utils.shard(pred_batch)
+  # print("PRED BATCH SHAPE AFTER SHARD", pred_batch.shape)
+  # print("INITIALIZING CACHE")
+  cache = p_init_cache(pred_batch)
+
+  # target is the optimizer target, i.e. the model and its weights.
+  # print("PRED BATCH SIZE BEFORE P_PRED_STEP: ", pred_batch.shape)
+  predicted = p_pred_step(pred_batch, target, cache, decode.EOS_ID, max_predict_length)
+  # print("PREDICTED: ", predicted.shape)
+  # predicted = tohost(predicted)
+  # print("PREDICTED: ", predicted.shape)  
+  # inputs = tohost(pred_batch)
+  inputs = pred_batch
+  # targets = tohost(pred_batch["targets"])
+  # Iterate through non-padding examples of batch.
+  for i, s in enumerate(predicted[:cur_pred_batch_size]):
+    sources.append(decode_tokens(inputs[i]))
+    # references.append(decode_tokens(targets[i]))
+    predictions.append(decode_tokens(s))
+  # logging.info("Translation: %d predictions %d references %d sources.",
+  #              len(predictions), len(references), len(sources))
+  return sources, predictions
+
+# TODO(jesse): need to move all batching logic into the server, but this should be what we need
+# assuming that p_pred_step, p_init_cache etc are all defined.
+def translate_step (*, pred_batch, p_pred_step, p_init_cache, target,
+                    decode_tokens, max_predict_length: int):
+  sources, references, predictions = [], [], []
+  pred_batch = jax.tree_map(lambda x: x._numpy(), pred_batch)  # pylint: disable=protected-access
+  # Handle final odd-sized batch by padding instead of dropping it.
+  cur_pred_batch_size = pred_batch["inputs"].shape[0]
+  if cur_pred_batch_size % n_devices: # never an issue with n_devices = 1
+    padded_size = int(np.ceil(cur_pred_batch_size / n_devices) * n_devices)
+    pred_batch = jax.tree_map(
+        lambda x: pad_examples(x, padded_size),  # pylint: disable=cell-var-from-loop
+        pred_batch)
+  pred_batch = common_utils.shard(pred_batch)
+  cache = p_init_cache(pred_batch["inputs"])
+
+  # target is the optimizer target, i.e. the model and its weights.
+  predicted = p_pred_step(pred_batch["inputs"], target, cache, decode.EOS_ID,
+                          max_predict_length)
+  predicted = tohost(predicted)
+  inputs = tohost(pred_batch["inputs"])
+  targets = tohost(pred_batch["targets"])
+  # Iterate through non-padding examples of batch.
+  for i, s in enumerate(predicted[:cur_pred_batch_size]):
+    sources.append(decode_tokens(inputs[i]))
+    references.append(decode_tokens(targets[i]))
+    predictions.append(decode_tokens(s))
+  # logging.info("Translation: %d predictions %d references %d sources.",
+  #              len(predictions), len(references), len(sources))
+  return sources, references, predictions
+
+  # # Calculate BLEU score for translated eval corpus against reference.
+  # bleu_matches = bleu.bleu_partial(references, predictions)
+  # all_bleu_matches = per_host_sum_pmap(bleu_matches)
+  # bleu_score = bleu.complete_bleu(*all_bleu_matches)
+  # # Save translation samples for tensorboard.
+  # exemplars = ""
+  # for n in np.random.choice(np.arange(len(predictions)), 8):
+  #   exemplars += f"{sources[n]}\n\n{references[n]}\n\n{predictions[n]}\n\n"
+  # return exemplars, bleu_score
 
 def translate_and_calculate_bleu(*, p_pred_step, p_init_cache, target,
                                  predict_ds: tf.data.Dataset, decode_tokens,
@@ -369,26 +454,17 @@ def translate_and_calculate_bleu(*, p_pred_step, p_init_cache, target,
   logging.info("Translating evaluation dataset.")
   sources, references, predictions = [], [], []
   for pred_batch in predict_ds:
-    pred_batch = jax.tree_map(lambda x: x._numpy(), pred_batch)  # pylint: disable=protected-access
-    # Handle final odd-sized batch by padding instead of dropping it.
-    cur_pred_batch_size = pred_batch["inputs"].shape[0]
-    if cur_pred_batch_size % n_devices:
-      padded_size = int(np.ceil(cur_pred_batch_size / n_devices) * n_devices)
-      pred_batch = jax.tree_map(
-          lambda x: pad_examples(x, padded_size),  # pylint: disable=cell-var-from-loop
-          pred_batch)
-    pred_batch = common_utils.shard(pred_batch)
-    cache = p_init_cache(pred_batch["inputs"])
-    predicted = p_pred_step(pred_batch["inputs"], target, cache, decode.EOS_ID,
-                            max_predict_length)
-    predicted = tohost(predicted)
-    inputs = tohost(pred_batch["inputs"])
-    targets = tohost(pred_batch["targets"])
-    # Iterate through non-padding examples of batch.
-    for i, s in enumerate(predicted[:cur_pred_batch_size]):
-      sources.append(decode_tokens(inputs[i]))
-      references.append(decode_tokens(targets[i]))
-      predictions.append(decode_tokens(s))
+    batch_sources, batch_references, batch_predictions = translate_step(
+      pred_batch=pred_batch,
+      p_pred_step=p_pred_step,
+      p_init_cache=p_init_cache,
+      target=target,
+      decode_token=decode_tokens,
+      max_predict_lengt=max_predict_length,
+    )
+    sources += batch_sources
+    references += batch_references
+    predictions += batch_predictions
   logging.info("Translation: %d predictions %d references %d sources.",
                len(predictions), len(references), len(sources))
 
@@ -402,6 +478,108 @@ def translate_and_calculate_bleu(*, p_pred_step, p_init_cache, target,
     exemplars += f"{sources[n]}\n\n{references[n]}\n\n{predictions[n]}\n\n"
   return exemplars, bleu_score
 
+def build_pred_thunks(
+    config: ml_collections.ConfigDict,
+    workdir: str,
+):
+  """
+  Builds a model and returns `p_init_cache`, `p_pred_step`, and `target`
+  required for batch prediction.
+  """
+  tf.io.gfile.makedirs(workdir)
+
+  vocab_path = config.vocab_path
+  if vocab_path is None:
+    vocab_path = os.path.join(workdir, "sentencepiece_model")
+  tf.io.gfile.makedirs(os.path.split(vocab_path)[0])
+
+  # Load Dataset
+  # ---------------------------------------------------------------------------
+  logging.info("Initializing dataset.")
+  train_ds, eval_ds, predict_ds, encoder = input_pipeline.get_wmt_datasets(
+      n_devices=jax.local_device_count(),
+      config=config,
+      vocab_path=vocab_path)
+
+  train_iter = iter(train_ds)
+  vocab_size = int(encoder.vocab_size())
+  eos_id = decode.EOS_ID  # Default Sentencepiece EOS token.
+
+  def decode_tokens(toks):
+    # print("TOKS: ", toks)
+    valid_toks = toks[:np.argmax(toks == eos_id) + 1].astype(np.int32)
+    return encoder.detokenize(valid_toks).numpy().decode("utf-8")
+
+  # if config.num_predict_steps > 0:
+  #   predict_ds = predict_ds.take(config.num_predict_steps)
+
+  logging.info("Initializing model, optimizer, and step functions.")
+  
+  train_config = models.TransformerConfig(
+      vocab_size=vocab_size,
+      output_vocab_size=vocab_size,
+      share_embeddings=config.share_embeddings,
+      logits_via_embedding=config.logits_via_embedding,
+      dtype=jnp.bfloat16 if config.use_bfloat16 else jnp.float32,
+      emb_dim=config.emb_dim,
+      num_heads=config.num_heads,
+      num_layers=config.num_layers,
+      qkv_dim=config.qkv_dim,
+      mlp_dim=config.mlp_dim,
+      max_len=max(config.max_target_length, config.max_eval_target_length),
+      dropout_rate=config.dropout_rate,
+      attention_dropout_rate=config.attention_dropout_rate,
+      deterministic=False,
+      decode=False,
+      kernel_init=nn.initializers.xavier_uniform(),
+      bias_init=nn.initializers.normal(stddev=1e-6))
+  eval_config = train_config.replace(deterministic=True)
+  predict_config = train_config.replace(deterministic=True, decode=True)
+
+  start_step = 0
+  rng = jax.random.PRNGKey(config.seed)
+  rng, init_rng = jax.random.split(rng)
+  input_shape = (config.per_device_batch_size, config.max_target_length)
+  target_shape = (config.per_device_batch_size, config.max_target_length)
+
+  m = models.Transformer(eval_config)
+  initial_variables = jax.jit(m.init)(init_rng,
+                                      jnp.ones(input_shape, jnp.float32),
+                                      jnp.ones(target_shape, jnp.float32))
+
+  # apply an optimizer to this tree
+  optimizer_def = optim.Adam(
+      config.learning_rate,
+      beta1=0.9,
+      beta2=0.98,
+      eps=1e-9,
+      weight_decay=config.weight_decay)
+  optimizer = optimizer_def.create(initial_variables["params"])
+  # print("[build_pred_thunks] BUILT OPTIMIZER")
+
+  if config.restore_checkpoints:
+    # Restore unreplicated optimizer + model state from last checkpoint.
+    optimizer = checkpoints.restore_checkpoint(workdir, optimizer)
+    # Grab last step.
+    start_step = int(optimizer.state.step)
+  
+  # p_init_cache = jax.pmap(
+  #     functools.partial(
+  #         initialize_cache,
+  #         max_decode_len=config.max_predict_length,
+  #         config=predict_config),
+  #     axis_name="batch")
+
+  p_init_cache = functools.partial(initialize_cache, max_decode_len=config.max_predict_length, config=predict_config)
+  
+  # p_pred_step = jax.pmap(
+  #     functools.partial(
+  #         predict_step, config=predict_config, beam_size=config.beam_size),
+  #     axis_name="batch",
+  #     static_broadcasted_argnums=(3, 4))  # eos token, max_length are constant
+
+  p_pred_step = functools.partial(predict_step, config=predict_config, beam_size=config.beam_size) # eos token, max_length are constant  
+  return p_init_cache, p_pred_step, optimizer.target, decode_tokens, encoder, m, predict_config
 
 def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
   """Runs a training and evaluation loop.
@@ -420,13 +598,15 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
 
   # Load Dataset
   # ---------------------------------------------------------------------------
+  
+  # TODO(jesse): refactor this to only grab the encoder for inference
   logging.info("Initializing dataset.")
   train_ds, eval_ds, predict_ds, encoder = input_pipeline.get_wmt_datasets(
       n_devices=jax.local_device_count(),
       config=config,
       vocab_path=vocab_path)
 
-  train_iter = iter(train_ds)
+  # train_iter = iter(train_ds)
   vocab_size = int(encoder.vocab_size())
   eos_id = decode.EOS_ID  # Default Sentencepiece EOS token.
 
@@ -532,7 +712,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
   # ---------------------------------------------------------------------------
 
   # We init the first set of dropout PRNG keys, but update it afterwards inside
-  # the main pmap"d training update for performance.
+  # the main pmap'd training update for performance.
   dropout_rngs = jax.random.split(rng, jax.local_device_count())
   del rng
 

@@ -331,7 +331,11 @@ class Encoder(nn.Module):
       output of a transformer encoder.
     """
     cfg = self.config
-    assert inputs.ndim == 2  # (batch, len)
+    try:
+      assert inputs.ndim == 2  # (batch, len)
+    except AssertionError as e:
+      print("INPUTS SHAPE UNEXPECTED: ", inputs.shape)
+      raise e
 
     # Input Embedding
     if self.shared_embedding is None:

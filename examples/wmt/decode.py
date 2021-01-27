@@ -189,7 +189,7 @@ def beam_search(inputs,
        [batch_size, beam_size] beam-search scores.
   """
   # We liberally annotate shape information for clarity below.
-
+  # print("[beam_search] ENTERING")
   batch_size = inputs.shape[0]
   if max_decode_len is None:
     max_decode_len = inputs.shape[1]
