@@ -132,7 +132,13 @@ def _get_suffix_value_pairs(
     tree_or_leaf: Any) -> List[Tuple[str, Type["Module"]]]:
   """Helper for naming pytrees of submodules."""
   dict_or_leaf = serialization.to_state_dict(tree_or_leaf)
-  if dict_or_leaf == {} or not isinstance(dict_or_leaf, dict):
+  flag = dict_or_leaf == {}
+  if isinstance(flag, bool):
+    pass
+  else:
+    print("WARNING: FLAG: ", flag)
+    flag = flag.all()
+  if flag or not isinstance(dict_or_leaf, dict):
     return [('', tree_or_leaf)]
   else:
     flat_dict = traverse_util.flatten_dict(dict_or_leaf)

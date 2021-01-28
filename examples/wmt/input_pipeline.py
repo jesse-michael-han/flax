@@ -340,7 +340,7 @@ def get_wmt_datasets(config: ml_collections.ConfigDict,
   # train_data = get_raw_dataset(
   #     train_ds_builder, 'train', reverse_translation=reverse_translation)
   train_data = load_data(config.dataset_name, "train")
-  eval_data = load_data(config.dataset_name, "eval")
+  eval_data = load_data(config.dataset_name, "valid")
 
   # if config.eval_dataset_name:
   #   eval_ds_builder = tfds.builder(config.eval_dataset_name)

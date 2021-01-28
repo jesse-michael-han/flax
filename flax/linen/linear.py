@@ -24,6 +24,7 @@ from flax.linen.initializers import lecun_normal, variance_scaling, zeros
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
+import jax
 
 
 PRNGKey = Any
@@ -394,6 +395,7 @@ class Embed(Module):
                                 self.embedding_init,
                                 (self.num_embeddings, self.features),
                                 self.dtype)
+    self._call = jax.vmap(jax.device_put(self.embedding).__getitem__, in_axes=-1, out_axes=-2)
 
   def __call__(self, inputs):
     """Embeds the inputs along the last dimension.
@@ -407,7 +409,7 @@ class Embed(Module):
     """
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError('Input type must be an integer or unsigned integer.')
-    return self.embedding[inputs]
+    return self._call(inputs)
 
   def attend(self, query):
     """Attend over the embedding using a query array.

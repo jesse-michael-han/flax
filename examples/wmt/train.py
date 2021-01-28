@@ -247,9 +247,15 @@ def initialize_cache(inputs, max_decode_len, config):
   """Initialize a cache for a given input shape and max decode length."""
   # print("INITIALIZING CACHE FOR INPUTS OF SHAPE: ", inputs.shape)
   target_shape = (inputs.shape[0], max_decode_len) + inputs.shape[2:]
+  print("GETTING INITIAL VARIABLES")
+  print("TARGET SHAPE: ", target_shape)
+  target_ones = jnp.ones(target_shape, config.dtype)
+  print("ONES SHAPE: ", target_ones.shape)
+  print("INPUTS SHAPE BEFORE CACHE INIT: ", inputs.shape)
   initial_variables = models.Transformer(config).init(
       jax.random.PRNGKey(0), jnp.ones(inputs.shape, config.dtype),
-      jnp.ones(target_shape, config.dtype))
+      target_ones)
+  print("GOT INITIAL VARIABLES")
   return initial_variables["cache"]
 
 
@@ -268,6 +274,7 @@ def predict_step(inputs,
   # i.e. if we denote each batch element subtensor as el[n]:
   # [el0, el1, el2] --> beamsize=2 --> [el0,el0,el1,el1,el2,el2]
   # print("[predict_step] ENTERING")
+  # inputs = jnp.asarray(inputs)
   encoded_inputs = decode.flat_batch_beam_expand(
       models.Transformer(config).apply({"params": params},
                                        inputs,
@@ -306,10 +313,73 @@ def predict_step(inputs,
       eos_id=eos_id,
       max_decode_len=max_decode_len)
 
+  print("[beam_search] beam_seqs", beam_seqs)
+
   # Beam search returns [n_batch, n_beam, n_length + 1] with beam dimension
   # sorted in increasing order of log-probability.
   # Return the highest scoring beam sequence, drop first dummy 0 token.
   return beam_seqs[:, -1, 1:]
+
+def predict_step2(inputs,
+                 params,
+                 cache,
+                 eos_id,
+                 max_decode_len,
+                 config,
+                 beam_size=4):
+  """Predict translation with fast decoding beam search on a batch."""
+  # Prepare transformer fast-decoder call for beam search: for beam search, we
+  # need to set up our decoder model to handle a batch size equal to
+  # batch_size * beam_size, where each batch item"s data is expanded in-place
+  # rather than tiled.
+  # i.e. if we denote each batch element subtensor as el[n]:
+  # [el0, el1, el2] --> beamsize=2 --> [el0,el0,el1,el1,el2,el2]
+  # inputs = jnp.array(inputs)
+  print("[predict_step2] ENTERING")
+  beam_expand_args = models.Transformer(config)
+  print("[predict_step2] GOT MODEL")
+  beam_expand_args = beam_expand_args.apply({"params": params}, inputs, method=models.Transformer.encode)
+  print("[predict_step2] GOT BEAM_EXPAND_ARGS")
+  encoded_inputs = decode.flat_batch_beam_expand(beam_expand_args, beam_size)
+  print("[predict_step2] GOT ENCODED INPUTS")
+  raw_inputs = decode.flat_batch_beam_expand(inputs, beam_size)
+  print("[predict_step2] GOT RAW INPUTS")
+
+  def tokens_ids_to_logits(flat_ids, flat_cache):
+    """Token slice to logits from decoder model."""
+    # --> [batch * beam, 1, vocab]
+    print("[tokens_id_to_logits] ENTERING")
+    flat_logits, new_vars = models.Transformer(config).apply(
+        {
+            "params": params,
+            "cache": flat_cache
+        },
+        encoded_inputs,
+        raw_inputs,  # only needed for input padding mask
+        flat_ids,
+        mutable=["cache"],
+        method=models.Transformer.decode)
+    new_flat_cache = new_vars["cache"]
+    # Remove singleton sequence-length dimension:
+    # [batch * beam, 1, vocab] --> [batch * beam, vocab]
+    flat_logits = flat_logits.squeeze(axis=1)
+    return flat_logits, new_flat_cache
+
+  # Using the above-defined single-step decoder function, run a
+  # beam search over possible sequences given input encoding.
+  beam_seqs, beam_scores = decode.beam_search(
+      inputs,
+      cache,
+      tokens_ids_to_logits,
+      beam_size=beam_size,
+      alpha=0.6,
+      eos_id=eos_id,
+      max_decode_len=max_decode_len)
+
+  # Beam search returns [n_batch, n_beam, n_length + 1] with beam dimension
+  # sorted in increasing order of log-probability.
+  # Return the highest scoring beam sequence, drop first dummy 0 token.
+  return beam_seqs[:,:,1:], beam_scores[:,:]
 
 
 # Utils for prediction and BLEU calculation
@@ -368,9 +438,11 @@ def evaluate(*, p_eval_step, target, eval_ds: tf.data.Dataset,
 def decode_step(*, pred_batch, p_pred_step, p_init_cache, target,
                     decode_tokens, max_predict_length: int):
   sources, references, predictions = [], [], []
-  # print("PRED BATCH SHAPE BEFORE TREE_MAP", pred_batch.shape)
-  pred_batch = jax.tree_map(lambda x: x._numpy(), pred_batch)  # pylint: disable=protected-access
-  # print("PRED BATCH SHAPE AFTER TREE_MAP", pred_batch.shape)  
+  print("PRED BATCH SHAPE BEFORE TREE_MAP", pred_batch.shape)
+  # pred_batch = jax.tree_map(lambda x: x._numpy(), pred_batch)  # pylint: disable=protected-access
+  pred_batch = jnp.array(pred_batch)
+
+  print("PRED BATCH SHAPE AFTER TREE_MAP", pred_batch.shape)
   # Handle final odd-sized batch by padding instead of dropping it.
   # cur_pred_batch_size = pred_batch["inputs"].shape[0]
   cur_pred_batch_size = pred_batch.shape[0]
@@ -381,29 +453,31 @@ def decode_step(*, pred_batch, p_pred_step, p_init_cache, target,
     # pred_batch = jax.tree_map(
     #     lambda x: pad_examples(x, padded_size),  # pylint: disable=cell-var-from-loop
     #     pred_batch)
-  # print("PRED BATCH SHAPE BEFORE SHARD", pred_batch.shape)    
+  # print("PRED BATCH SHAPE BEFORE SHARD", pred_batch.shape)
   # pred_batch = common_utils.shard(pred_batch)
   # print("PRED BATCH SHAPE AFTER SHARD", pred_batch.shape)
   # print("INITIALIZING CACHE")
+  print("PRED BATCH SIZE BEFORE INIT CACHE", pred_batch.shape)
   cache = p_init_cache(pred_batch)
 
   # target is the optimizer target, i.e. the model and its weights.
-  # print("PRED BATCH SIZE BEFORE P_PRED_STEP: ", pred_batch.shape)
-  predicted = p_pred_step(pred_batch, target, cache, decode.EOS_ID, max_predict_length)
+  print("PRED BATCH SIZE BEFORE P_PRED_STEP: ", pred_batch.shape)
+  predicted, scores = p_pred_step(pred_batch, target, cache, decode.EOS_ID, max_predict_length)
   # print("PREDICTED: ", predicted.shape)
   # predicted = tohost(predicted)
-  # print("PREDICTED: ", predicted.shape)  
+  # print("PREDICTED: ", predicted.shape)
   # inputs = tohost(pred_batch)
   inputs = pred_batch
   # targets = tohost(pred_batch["targets"])
   # Iterate through non-padding examples of batch.
   for i, s in enumerate(predicted[:cur_pred_batch_size]):
     sources.append(decode_tokens(inputs[i]))
+    print("PREDICTED: ", s)
     # references.append(decode_tokens(targets[i]))
-    predictions.append(decode_tokens(s))
+    predictions.append([decode_tokens(x) for x in s])
   # logging.info("Translation: %d predictions %d references %d sources.",
   #              len(predictions), len(references), len(sources))
-  return sources, predictions
+  return sources, predictions, scores
 
 # TODO(jesse): need to move all batching logic into the server, but this should be what we need
 # assuming that p_pred_step, p_init_cache etc are all defined.
@@ -413,11 +487,11 @@ def translate_step (*, pred_batch, p_pred_step, p_init_cache, target,
   pred_batch = jax.tree_map(lambda x: x._numpy(), pred_batch)  # pylint: disable=protected-access
   # Handle final odd-sized batch by padding instead of dropping it.
   cur_pred_batch_size = pred_batch["inputs"].shape[0]
-  if cur_pred_batch_size % n_devices: # never an issue with n_devices = 1
-    padded_size = int(np.ceil(cur_pred_batch_size / n_devices) * n_devices)
-    pred_batch = jax.tree_map(
-        lambda x: pad_examples(x, padded_size),  # pylint: disable=cell-var-from-loop
-        pred_batch)
+  # if cur_pred_batch_size % n_devices: # never an issue with n_devices = 1
+  #   padded_size = int(np.ceil(cur_pred_batch_size / n_devices) * n_devices)
+  #   pred_batch = jax.tree_map(
+  #       lambda x: pad_examples(x, padded_size),  # pylint: disable=cell-var-from-loop
+  #       pred_batch)
   pred_batch = common_utils.shard(pred_batch)
   cache = p_init_cache(pred_batch["inputs"])
 
@@ -459,8 +533,8 @@ def translate_and_calculate_bleu(*, p_pred_step, p_init_cache, target,
       p_pred_step=p_pred_step,
       p_init_cache=p_init_cache,
       target=target,
-      decode_token=decode_tokens,
-      max_predict_lengt=max_predict_length,
+      decode_tokens=decode_tokens,
+      max_predict_length=max_predict_length,
     )
     sources += batch_sources
     references += batch_references
@@ -501,12 +575,12 @@ def build_pred_thunks(
       config=config,
       vocab_path=vocab_path)
 
-  train_iter = iter(train_ds)
+  # train_iter = iter(train_ds)
   vocab_size = int(encoder.vocab_size())
   eos_id = decode.EOS_ID  # Default Sentencepiece EOS token.
 
   def decode_tokens(toks):
-    # print("TOKS: ", toks)
+  # print("TOKS: ", toks)
     valid_toks = toks[:np.argmax(toks == eos_id) + 1].astype(np.int32)
     return encoder.detokenize(valid_toks).numpy().decode("utf-8")
 
@@ -514,7 +588,7 @@ def build_pred_thunks(
   #   predict_ds = predict_ds.take(config.num_predict_steps)
 
   logging.info("Initializing model, optimizer, and step functions.")
-  
+
   train_config = models.TransformerConfig(
       vocab_size=vocab_size,
       output_vocab_size=vocab_size,
@@ -542,7 +616,7 @@ def build_pred_thunks(
   input_shape = (config.per_device_batch_size, config.max_target_length)
   target_shape = (config.per_device_batch_size, config.max_target_length)
 
-  m = models.Transformer(eval_config)
+  m = models.Transformer(predict_config)
   initial_variables = jax.jit(m.init)(init_rng,
                                       jnp.ones(input_shape, jnp.float32),
                                       jnp.ones(target_shape, jnp.float32))
@@ -559,9 +633,153 @@ def build_pred_thunks(
 
   if config.restore_checkpoints:
     # Restore unreplicated optimizer + model state from last checkpoint.
+
+    optimizer = checkpoints.restore_checkpoint(workdir, optimizer)
+  # print("[build_pred_thunks] RESTORED CHECKPOINT")
+
+    # Grab last step.
+    start_step = int(optimizer.state.step)
+  # print("START STEP: ", start_step)
+
+  p_init_cache = jax.pmap(
+      functools.partial(
+          initialize_cache,
+          max_decode_len=config.max_predict_length,
+          config=predict_config),
+      axis_name="batch")
+
+  # p_init_cache = functools.partial(initialize_cache, max_decode_len=config.max_predict_length, config=predict_config)
+
+  p_pred_step = jax.pmap(
+      functools.partial(
+          predict_step2, config=predict_config, beam_size=config.beam_size),
+      axis_name="batch",
+      static_broadcasted_argnums=(3, 4))  # eos token, max_length are constant
+
+  # p_pred_step = functools.partial(predict_step2, config=predict_config, beam_size=config.beam_size) # eos token, max_length are constant
+  return p_init_cache, p_pred_step, optimizer.target, decode_tokens, encoder, predict_config
+
+def train_and_evaluate2(config: ml_collections.ConfigDict, workdir: str, restore=True):
+  """Runs a training and evaluation loop.
+
+  Args:
+    config: Configuration to use.
+    workdir: Working directory for checkpoints and TF summaries. If this
+      contains checkpoint training will be resumed from the latest checkpoint.
+  """
+  tf.io.gfile.makedirs(workdir)
+
+  vocab_path = config.vocab_path
+  if vocab_path is None:
+    vocab_path = os.path.join(workdir, "sentencepiece_model")
+  tf.io.gfile.makedirs(os.path.split(vocab_path)[0])
+
+  # Load Dataset
+  # ---------------------------------------------------------------------------
+
+  # TODO(jesse): refactor this to only grab the encoder for inference
+  logging.info("Initializing dataset.")
+  train_ds, eval_ds, predict_ds, encoder = input_pipeline.get_wmt_datasets(
+      n_devices=jax.local_device_count(),
+      config=config,
+      vocab_path=vocab_path)
+
+  train_iter = iter(train_ds)
+  vocab_size = int(encoder.vocab_size())
+  eos_id = decode.EOS_ID  # Default Sentencepiece EOS token.
+
+  def decode_tokens(toks):
+    valid_toks = toks[:np.argmax(toks == eos_id) + 1].astype(np.int32)
+    return encoder.detokenize(valid_toks).numpy().decode("utf-8")
+
+  if config.num_predict_steps > 0:
+    predict_ds = predict_ds.take(config.num_predict_steps)
+
+  logging.info("Initializing model, optimizer, and step functions.")
+
+  # Build Model and Optimizer
+  # ---------------------------------------------------------------------------
+  train_config = models.TransformerConfig(
+      vocab_size=vocab_size,
+      output_vocab_size=vocab_size,
+      share_embeddings=config.share_embeddings,
+      logits_via_embedding=config.logits_via_embedding,
+      dtype=jnp.bfloat16 if config.use_bfloat16 else jnp.float32,
+      emb_dim=config.emb_dim,
+      num_heads=config.num_heads,
+      num_layers=config.num_layers,
+      qkv_dim=config.qkv_dim,
+      mlp_dim=config.mlp_dim,
+      max_len=max(config.max_target_length, config.max_eval_target_length),
+      dropout_rate=config.dropout_rate,
+      attention_dropout_rate=config.attention_dropout_rate,
+      deterministic=False,
+      decode=False,
+      kernel_init=nn.initializers.xavier_uniform(),
+      bias_init=nn.initializers.normal(stddev=1e-6))
+  eval_config = train_config.replace(deterministic=True)
+  predict_config = train_config.replace(deterministic=True, decode=True)
+
+  start_step = 0
+  rng = jax.random.PRNGKey(config.seed)
+  rng, init_rng = jax.random.split(rng)
+  input_shape = (config.per_device_batch_size, config.max_target_length)
+  target_shape = (config.per_device_batch_size, config.max_target_length)
+
+  m = models.Transformer(predict_config)
+  # initial_variables = jax.jit(m.init)(init_rng,
+  #                                     jnp.ones(input_shape, jnp.float32),
+  #                                     jnp.ones(target_shape, jnp.float32))
+  initial_variables = m.init(init_rng, jnp.ones(input_shape, jnp.float32), jnp.ones(target_shape, jnp.float32))
+
+  # apply an optimizer to this tree
+  optimizer_def = optim.Adam(
+      config.learning_rate,
+      beta1=0.9,
+      beta2=0.98,
+      eps=1e-9,
+      weight_decay=config.weight_decay)
+  optimizer = optimizer_def.create(initial_variables["params"])
+
+  # We access model params only from optimizer below via optimizer.target.
+  del initial_variables
+
+  if config.restore_checkpoints and restore:
+    # Restore unreplicated optimizer + model state from last checkpoint.
     optimizer = checkpoints.restore_checkpoint(workdir, optimizer)
     # Grab last step.
     start_step = int(optimizer.state.step)
+
+  writer = metric_writers.create_default_writer(
+      workdir, just_logging=jax.host_id() > 0)
+  if start_step == 1:
+    writer.write_hparams(dict(config))
+
+  # Replicate optimizer.
+  optimizer = optimizer
+
+  learning_rate_fn = create_learning_rate_scheduler(
+      base_learning_rate=config.learning_rate, warmup_steps=config.warmup_steps)
+
+  # compile multidevice versions of train/eval/predict step and cache init fn.
+  # p_train_step = jax.pmap(
+  #     functools.partial(
+  #         train_step,
+  #         config=train_config,
+  #         learning_rate_fn=learning_rate_fn,
+  #         label_smoothing=config.label_smoothing),
+  #     axis_name="batch",
+  #     donate_argnums=(0,))  # pytype: disable=wrong-arg-types
+  # p_eval_step = jax.pmap(
+  #     functools.partial(
+  #         eval_step, config=eval_config,
+  #         label_smoothing=config.label_smoothing),
+  #     axis_name="batch")
+  p_init_cache = functools.partial(initialize_cache,
+          max_decode_len=config.max_predict_length,
+          config=predict_config)
+
+  p_pred_step = functools.partial(predict_step2, config=predict_config, beam_size=config.beam_size)
   
   # p_init_cache = jax.pmap(
   #     functools.partial(
@@ -569,17 +787,13 @@ def build_pred_thunks(
   #         max_decode_len=config.max_predict_length,
   #         config=predict_config),
   #     axis_name="batch")
-
-  p_init_cache = functools.partial(initialize_cache, max_decode_len=config.max_predict_length, config=predict_config)
   
   # p_pred_step = jax.pmap(
   #     functools.partial(
   #         predict_step, config=predict_config, beam_size=config.beam_size),
   #     axis_name="batch",
   #     static_broadcasted_argnums=(3, 4))  # eos token, max_length are constant
-
-  p_pred_step = functools.partial(predict_step, config=predict_config, beam_size=config.beam_size) # eos token, max_length are constant  
-  return p_init_cache, p_pred_step, optimizer.target, decode_tokens, encoder, m, predict_config
+  return p_init_cache, p_pred_step, optimizer, decode_tokens, encoder, predict_config
 
 def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
   """Runs a training and evaluation loop.
@@ -598,7 +812,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
 
   # Load Dataset
   # ---------------------------------------------------------------------------
-  
+
   # TODO(jesse): refactor this to only grab the encoder for inference
   logging.info("Initializing dataset.")
   train_ds, eval_ds, predict_ds, encoder = input_pipeline.get_wmt_datasets(
@@ -606,7 +820,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
       config=config,
       vocab_path=vocab_path)
 
-  # train_iter = iter(train_ds)
+  train_iter = iter(train_ds)
   vocab_size = int(encoder.vocab_size())
   eos_id = decode.EOS_ID  # Default Sentencepiece EOS token.
 
@@ -721,7 +935,8 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
   report_progress = periodic_actions.ReportProgress(
       num_train_steps=config.num_train_steps, writer=writer)
   if jax.host_id() == 0:
-    hooks += [report_progress, periodic_actions.Profile(num_profile_steps=5)]
+    hooks += [report_progress# , periodic_actions.Profile(num_profile_steps=5)
+              ]
   train_metrics = []
   with metric_writers.ensure_flushes(writer):
     for step in range(start_step, config.num_train_steps):
@@ -729,7 +944,7 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
 
       # Shard data to devices and do a training step.
       with jax.profiler.StepTraceContext("train", step_num=step):
-        batch = common_utils.shard(jax.tree_map(np.asarray, next(train_iter)))
+        batch = common_utils.shard(jax.tree_map(jnp.asarray, next(train_iter)))
         optimizer, metrics = p_train_step(
             optimizer, batch, dropout_rng=dropout_rngs)
         train_metrics.append(metrics)
@@ -738,7 +953,6 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
       logging.log_first_n(logging.INFO, "Finished training step %d.", 5, step)
       for h in hooks:
         h(step)
-
       # Periodic metric handling.
       if step % config.eval_every_steps == 0 or is_last_step:
         with report_progress.timed("training_metrics"):
@@ -774,8 +988,16 @@ def train_and_evaluate(config: ml_collections.ConfigDict, workdir: str):
           writer.write_texts(step, {"samples": exemplars})
 
       # Save a checkpoint on one host after every checkpoint_freq steps.
-      save_checkpoint = step % config.checkpoint_every_steps or is_last_step
-      if config.save_checkpoints and save_checkpoint and jax.host_id():
+      save_checkpoint = (step % config.checkpoint_every_steps == 0) or is_last_step
+    # print("CONFIG SAVE CHECKPOINT: ", config.save_checkpoints)
+    # print("SAVE CHECKPOINT: ", save_checkpoint)
+      # print("JAX HOST ID: ", jax.host_id())
+    # print("STEP: ", step)
+      save_ckpt_flag = config.save_checkpoints and save_checkpoint and (jax.host_id() == 0)
+    # print("SAVE CHECKPOINT FLAG: ", save_ckpt_flag)
+      if save_ckpt_flag:
         with report_progress.timed("checkpoint"):
           checkpoints.save_checkpoint(workdir, jax_utils.unreplicate(optimizer),
                                       step)
+          # checkpoints.save_checkpoint(workdir, optimizer,
+          #                             step)

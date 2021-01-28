@@ -335,6 +335,7 @@ class Encoder(nn.Module):
       assert inputs.ndim == 2  # (batch, len)
     except AssertionError as e:
       print("INPUTS SHAPE UNEXPECTED: ", inputs.shape)
+      print("INPUTS UNEXPECTED: ", inputs)
       raise e
 
     # Input Embedding
@@ -345,17 +346,22 @@ class Encoder(nn.Module):
           embedding_init=nn.initializers.normal(stddev=1.0))
     else:
       input_embed = self.shared_embedding
+
     x = inputs.astype('int32')
+    print("X SHAPE BEFORE EMBED: ", x.shape)
+    print("X BEFORE EMBED: ", x)
+    x = jnp.array(x)
     x = input_embed(x)
+    print("X SHAPE AFTER EMBED: ", x.shape)
     x = AddPositionEmbs(config=cfg, decode=False, name='posembed_input')(
         x, inputs_positions=inputs_positions)
     x = nn.Dropout(rate=cfg.dropout_rate)(
         x, deterministic=cfg.deterministic)
-
     x = x.astype(cfg.dtype)
-
+    print("FORWARDING THROUGH LAYERS")
     # Input Encoder
     for lyr in range(cfg.num_layers):
+      print("LAYER")
       x = Encoder1DBlock(config=cfg, name=f'encoderblock_{lyr}')(
           x, encoder_mask)
 
@@ -394,6 +400,9 @@ class Decoder(nn.Module):
       output of a transformer decoder.
     """
     cfg = self.config
+    # print("[Decoder]", "ENCODED: ", encoded)
+    # print("[Decoder]", "TARGETS: ", targets)
+    
 
     assert encoded.ndim == 3  # (batch, len, depth)
     assert targets.ndim == 2  # (batch, len)
@@ -412,7 +421,7 @@ class Decoder(nn.Module):
       y = shift_right(y)
     y = output_embed(y)
     y = AddPositionEmbs(config=cfg, decode=cfg.decode, name='posembed_output')(
-        y, inputs_positions=targets_positions)
+                        y, inputs_positions=targets_positions)
     y = nn.Dropout(rate=cfg.dropout_rate)(
         y, deterministic=cfg.deterministic)
 
@@ -458,7 +467,8 @@ class Transformer(nn.Module):
     if cfg.share_embeddings:
       if cfg.output_vocab_size is not None:
         assert cfg.output_vocab_size == cfg.vocab_size, (
-            "can't share embedding with different vocab sizes.")
+            "can't share embedding with different vocab sizes."
+        )
       self.shared_embedding = nn.Embed(
           num_embeddings=cfg.vocab_size,
           features=cfg.emb_dim,

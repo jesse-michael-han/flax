@@ -12,6 +12,7 @@ import jax.numpy as jnp
 
 import functools
 import tokenizer
+from flax.training import checkpoints
 
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file(
@@ -41,17 +42,9 @@ def main(argv):
     platform.work_unit().create_artifact(platform.ArtifactType.DIRECTORY,
                                          FLAGS.workdir, "workdir")
 
-    p_init_cache, p_pred_step, target, decode_tokens, encoder, m, predict_config = build_pred_thunks(FLAGS.config, FLAGS.workdir)
+    p_init_cache, p_pred_step, optimizer, decode_tokens, encoder, predict_config = train_and_evaluate2(FLAGS.config, FLAGS.workdir, restore=False)
     # p_tokenizer = tokenizer.TokenizeOp(encoder)
     # p_tokenize = encoder.tokenize
-    p_translate_step = functools.partial(
-        decode_step,
-        p_pred_step=p_pred_step,
-        p_init_cache=p_init_cache,
-        target=target,
-        decode_tokens=decode_tokens,
-        max_predict_length=FLAGS.config.max_predict_length,
-    )
     print("OK")
     ragged = encoder.tokenize(["foo bar baz", "HELLO THIS IS SPONGEBOB"])
     def mk_ragged_iterator(ragged):
@@ -64,14 +57,48 @@ def main(argv):
             batch.append(tks[:padding_length])
         else:
             batch.append(tf.pad(tks, [[0, padding_length]]))
-    pred_batch = tf.stack(batch)# ._numpy()
-    # print("PRED BATCH: ", pred_batch)
-    # print()
-    # decode_target = jnp.array([[0], [0]], dtype=jnp.int32)
+    pred_batch = tf.stack(batch)
+    decode_target = np.array([[3], [3]], dtype=jnp.int32)
+    # old_target = optimizer.target
+
+    # try:
+    #     checkpoints.save_checkpoint(FLAGS.workdir, optimizer, 9999, keep=3)
+    # except:
+    #     pass
+    optimizer = checkpoints.restore_checkpoint(FLAGS.workdir, optimizer)
+
+    target = optimizer.target
+
+    p_translate_step = functools.partial(
+        decode_step,
+        p_pred_step=p_pred_step,
+        p_init_cache=p_init_cache,
+        target=target,
+        decode_tokens=decode_tokens,
+        max_predict_length=FLAGS.config.max_predict_length,
+    )
+    
+    # print("LEN TARGET: ", len(target))
+    
+    # print("RESTORED SUCCESSFULLY")
+    # # x,y = jax.tree_util.tree_flatten(target)
+    # # old_x, _ = jax.tree_util.tree_flatten(old_target)
+    # # print("EQUALITY TEST: ", x == old_x)
+    
     # # result = target(pred_batch._numpy(), decode_target)
+    
     # result = models.Transformer(predict_config).apply(
     #     {"params":target},
     #     pred_batch,
+    #     decode_target,
+    #     method=models.Transformer.__call__
+    # )
+
+    # print("RESULT: ", result)
+    
+    # result = models.Transformer(predict_config).apply(
+    #     {"params":target},
+    #     pred_batch._numpy(),
     #     method=models.Transformer.encode
     # )
 
@@ -80,7 +107,7 @@ def main(argv):
     # result, cache = models.Transformer(predict_config).apply(
     #     {"params":target},
     #     result,
-    #     pred_batch,
+    #     pred_batch._numpy(),
     #     decode_target,
     #     mutable=["cache"],
     #     method=models.Transformer.decode
@@ -90,7 +117,13 @@ def main(argv):
 
     result = p_translate_step(pred_batch=pred_batch)
     print("RESULT: ", result)
-    # result = m
+    
+    # # result = m
+
+    # try:
+    #     checkpoints.save_checkpoint(FLAGS.workdir, optimizer, 9999, keep=3)
+    # except:
+    #     pass    
             
 
 if __name__ == "__main__":

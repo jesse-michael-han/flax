@@ -47,7 +47,7 @@ def get_config():
   # Beam size for inference.
   config.beam_size = 4
 
-  config.num_train_steps = 100_000
+  config.num_train_steps = 3_000
 
   # Number of steps to take during evaluation.
   config.num_eval_steps = 20
@@ -105,12 +105,12 @@ def get_config():
   config.restore_checkpoints = True
 
   # Save a checkpoint every these number of steps.
-  config.checkpoint_every_steps = 10_000
+  config.checkpoint_every_steps = 1_000
   # Frequency of eval during training, e.g. every 1000 steps.
   config.eval_every_steps = 1_000
 
   # Use bfloat16 mixed precision training instead of float32.
-  config.use_bfloat16 = True
+  config.use_bfloat16 = False
 
   # Integer for PRNG random seed.
   config.seed = 0
