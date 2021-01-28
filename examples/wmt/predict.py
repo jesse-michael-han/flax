@@ -22,6 +22,11 @@ flags.DEFINE_string("jax_backend_target", None,
                     "JAX backend target to use. Can be used with UPTC.")
 flags.mark_flags_as_required(["config", "workdir"])
 
+# notes:
+# train_and_evaluate2 supercedes build_pred_thunks
+# predict_step2 supercedes predict_step
+# decode_step supercedes translate_step for prediction
+# TODO: move the modified linen.Embed into a separate file
 def main(argv):
     if len(argv) > 1:
         raise app.UsageError("Too many command-line arguments.")
